@@ -1,0 +1,74 @@
+# 'dataset' holds the input data for this script
+import pandas as pd
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, accuracy_score, roc_auc_score
+from sklearn.model_selection import train_test_split
+
+# Step 1: Create binary target from CA_Value (top 30%)
+threshold = dataset['CA_Value'].quantile(0.70)
+dataset['High_CA'] = (dataset['CA_Value'] >= threshold).astype(int)
+
+# Step 2: Identify PBS columns
+pbs_cols = [col for col in dataset.columns if col.startswith('PBS')]
+
+# Step 3: Prepare features and scale them (with median imputation)
+X = dataset[pbs_cols].fillna(dataset[pbs_cols].median())
+y = dataset['High_CA']
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# Step 4: Train multivariable logistic regression model
+model = LogisticRegression(max_iter=1000)
+model.fit(X_scaled, y)
+
+# Step 5: Predict and store output
+dataset['Predicted_Prob'] = model.predict_proba(X_scaled)[:, 1]
+dataset['Predicted_High_CA'] = model.predict(X_scaled)
+
+# Step 6: Create base coefficient table
+coeff_df = pd.DataFrame({
+    'PBS Category': pbs_cols,
+    'Coefficient': model.coef_[0],
+    'Odds Ratio': np.exp(model.coef_[0])
+})
+coeff_df['Effect'] = coeff_df['Coefficient'].apply(
+    lambda x: '↑ Risk' if x > 0 else '↓ Risk' if x < 0 else 'No Effect'
+)
+
+# Step 7: Calculate individual accuracy and AUC for each PBS
+pbs_metrics = []
+for col in pbs_cols:
+    temp_df = dataset[[col, 'High_CA']].dropna()
+    if temp_df[col].nunique() > 1:
+        X_single = temp_df[[col]].fillna(temp_df[col].median())
+        y_single = temp_df['High_CA']
+
+        # Scale and split
+        scaler_single = StandardScaler()
+        X_scaled_single = scaler_single.fit_transform(X_single)
+        X_train, X_test, y_train, y_test = train_test_split(X_scaled_single, y_single, stratify=y_single, random_state=42)
+
+        # Train and evaluate
+        model_single = LogisticRegression(max_iter=1000)
+        model_single.fit(X_train, y_train)
+        y_pred = model_single.predict(X_test)
+        y_prob = model_single.predict_proba(X_test)[:, 1]
+
+        acc = accuracy_score(y_test, y_pred)
+        auc = roc_auc_score(y_test, y_prob)
+
+        pbs_metrics.append({
+            'PBS Category': col,
+            'Accuracy': round(acc, 3),
+            'ROC AUC': round(auc, 3)
+        })
+
+# Merge accuracy and AUC into coeff_df
+metrics_df = pd.DataFrame(pbs_metrics)
+coeff_df = pd.merge(coeff_df, metrics_df, on='PBS Category', how='left')
+coeff_df = coeff_df.sort_values(by='ROC AUC', ascending=False)
+
+# Final output for Power BI
+coeff_df
